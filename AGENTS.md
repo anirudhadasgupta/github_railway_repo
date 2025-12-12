@@ -1027,25 +1027,25 @@ CMD ["python", "-m", "server.main"]
 
 ### Build
 
-* [ ] Tools implemented: outline, keyword search, semantic search, file content, file history, diff, commit/branch/tag history
-* [ ] Index jobs table + worker loop (or queue) implemented
-* [ ] Qdrant collection created on startup
-* [ ] Chunk IDs deterministic and deduplication applied
+* [x] Tools implemented: outline, keyword search, semantic search, file content, file history, diff, commit/branch/tag history
+* [x] Index jobs table + worker loop (or queue) implemented
+* [x] Qdrant collection created on startup
+* [x] Chunk IDs deterministic and deduplication applied
 
 ### Deploy (Railway)
 
-* [ ] Postgres service added; `DATABASE_URL` wired
-* [ ] Qdrant template deployed
-* [ ] Qdrant has a Volume mounted (persistent storage)
-* [ ] Dockerfile present and detected
-* [ ] Environment variables configured (PAT/OpenAI key as secrets)
+* [x] Postgres service added; `DATABASE_URL` wired
+* [x] Qdrant template deployed
+* [x] Qdrant has a Volume mounted (persistent storage)
+* [x] Dockerfile present and detected
+* [x] Environment variables configured (PAT/OpenAI key as secrets)
 
 ### ChatGPT integration
 
-* [ ] Developer mode enabled for connectors
-* [ ] Connector URL uses HTTPS
-* [ ] If SSE: URL ends with `/sse/`
-* [ ] Run a test flow:
+* [x] Developer mode enabled for connectors
+* [x] Connector URL uses HTTPS
+* [x] If SSE: URL ends with `/sse/`
+* [x] Run a test flow:
 
   1. `gh_index_repo(repo)`
   2. poll `gh_index_status(job_id)` until DONE
