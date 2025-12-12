@@ -12,7 +12,7 @@ dockerfilePath = "Dockerfile"
 [deploy]
 # MCP server (FastMCP SSE) entrypoint
 startCommand = "python -m server.main"
-healthcheckPath = "/sse/"
+healthcheckPath = "/health"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
 numReplicas = 1
