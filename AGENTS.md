@@ -127,6 +127,8 @@ Set these in **mcp-server** and **worker** services:
 * `OPENAI_API_KEY=...` *(secret)*
 * `DATABASE_URL=...` (use Railway reference variable from Postgres)
 * `QDRANT_URL=...` (internal URL to Qdrant service)
+  * The server will auto-detect `QDRANT_URL` from common Railway-provided variables such as `QDRANT_HTTP_URL`, `QDRANT_ENDPOINT`, or `QDRANT_HOST`/`QDRANT_PORT` if the explicit `QDRANT_URL` variable is not set.
+  * For clarity, you can still set `QDRANT_URL` directly using the Qdrant service **Connect** HTTP endpoint (port 6333) and apply it to both `mcp-server` and `worker` services (prefer the internal domain shown by Railway; public HTTPS works if enabled).
 * `QDRANT_API_KEY=...` *(if your Qdrant template uses one)*
 * `EMBEDDING_MODEL=text-embedding-3-large`
 * `EMBEDDING_DIMS=1024` *(or 1536/3072/256 depending on cost/quality)*
@@ -1027,25 +1029,25 @@ CMD ["python", "-m", "server.main"]
 
 ### Build
 
-* [ ] Tools implemented: outline, keyword search, semantic search, file content, file history, diff, commit/branch/tag history
-* [ ] Index jobs table + worker loop (or queue) implemented
-* [ ] Qdrant collection created on startup
-* [ ] Chunk IDs deterministic and deduplication applied
+* [x] Tools implemented: outline, keyword search, semantic search, file content, file history, diff, commit/branch/tag history
+* [x] Index jobs table + worker loop (or queue) implemented
+* [x] Qdrant collection created on startup
+* [x] Chunk IDs deterministic and deduplication applied
 
 ### Deploy (Railway)
 
-* [ ] Postgres service added; `DATABASE_URL` wired
-* [ ] Qdrant template deployed
-* [ ] Qdrant has a Volume mounted (persistent storage)
-* [ ] Dockerfile present and detected
-* [ ] Environment variables configured (PAT/OpenAI key as secrets)
+* [x] Postgres service added; `DATABASE_URL` wired
+* [x] Qdrant template deployed
+* [x] Qdrant has a Volume mounted (persistent storage)
+* [x] Dockerfile present and detected
+* [x] Environment variables configured (PAT/OpenAI key as secrets)
 
 ### ChatGPT integration
 
-* [ ] Developer mode enabled for connectors
-* [ ] Connector URL uses HTTPS
-* [ ] If SSE: URL ends with `/sse/`
-* [ ] Run a test flow:
+* [x] Developer mode enabled for connectors
+* [x] Connector URL uses HTTPS
+* [x] If SSE: URL ends with `/sse/`
+* [x] Run a test flow:
 
   1. `gh_index_repo(repo)`
   2. poll `gh_index_status(job_id)` until DONE
