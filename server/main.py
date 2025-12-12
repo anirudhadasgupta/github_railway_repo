@@ -3,6 +3,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
+from starlette.responses import PlainTextResponse
 
 from .config import require_core_secrets, settings
 from .db import Database
@@ -50,6 +51,10 @@ def build_server() -> FastMCP:
 
     mcp = FastMCP(name="github-private-repo-mcp", instructions=instructions)
     tool_opts = {"annotations": {"readOnlyHint": True}}
+
+    @mcp.custom_route("/health", methods=["GET"])
+    async def health_check(request):
+        return PlainTextResponse("OK")
 
     @mcp.tool(**tool_opts)
     def gh_list_repos(allow: Optional[str] = None) -> dict:
