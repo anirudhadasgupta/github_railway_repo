@@ -1,0 +1,38 @@
+# Railway configuration for MCP server + worker
+# Secrets (GITHUB_PAT, OPENAI_API_KEY, DATABASE_URL, QDRANT_URL, QDRANT_API_KEY, ALLOW_TOKEN)
+# should be set in the Railway dashboard or via service variables.
+
+[build]
+# Use the repo Dockerfile for both services
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# MCP server (FastMCP SSE) entrypoint
+startCommand = "python -m server.main"
+healthcheckPath = "/sse/"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
+numReplicas = 1
+
+[deploy.env]
+PORT = "8000"
+GITHUB_OWNER = "anirudhadasgupta"
+EMBEDDING_MODEL = "text-embedding-3-large"
+EMBEDDING_DIMS = "1024"
+MAX_FILE_BYTES = "250000"
+EXCLUDE_GLOBS = "node_modules/**,dist/**,build/**,.git/**,vendor/**,**/*.min.js,**/*.lock"
+
+[services.worker]
+# Background indexer worker shares the same image
+startCommand = "python -m server.worker"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
+
+[services.worker.env]
+PORT = "8000"
+GITHUB_OWNER = "anirudhadasgupta"
+EMBEDDING_MODEL = "text-embedding-3-large"
+EMBEDDING_DIMS = "1024"
+MAX_FILE_BYTES = "250000"
+EXCLUDE_GLOBS = "node_modules/**,dist/**,build/**,.git/**,vendor/**,**/*.min.js,**/*.lock"
