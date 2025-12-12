@@ -1,6 +1,8 @@
 # Railway configuration for MCP server + worker
 # Secrets (GITHUB_PAT, OPENAI_API_KEY, DATABASE_URL, QDRANT_URL, QDRANT_API_KEY, ALLOW_TOKEN)
 # should be set in the Railway dashboard or via service variables.
+# For QDRANT_URL, open the Qdrant service Connect tab and copy the HTTP endpoint (port 6333);
+# set that value on both services (internal domain preferred; public HTTPS works if enabled).
 
 [build]
 # Use the repo Dockerfile for both services

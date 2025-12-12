@@ -127,6 +127,8 @@ Set these in **mcp-server** and **worker** services:
 * `OPENAI_API_KEY=...` *(secret)*
 * `DATABASE_URL=...` (use Railway reference variable from Postgres)
 * `QDRANT_URL=...` (internal URL to Qdrant service)
+  * The server will auto-detect `QDRANT_URL` from common Railway-provided variables such as `QDRANT_HTTP_URL`, `QDRANT_ENDPOINT`, or `QDRANT_HOST`/`QDRANT_PORT` if the explicit `QDRANT_URL` variable is not set.
+  * For clarity, you can still set `QDRANT_URL` directly using the Qdrant service **Connect** HTTP endpoint (port 6333) and apply it to both `mcp-server` and `worker` services (prefer the internal domain shown by Railway; public HTTPS works if enabled).
 * `QDRANT_API_KEY=...` *(if your Qdrant template uses one)*
 * `EMBEDDING_MODEL=text-embedding-3-large`
 * `EMBEDDING_DIMS=1024` *(or 1536/3072/256 depending on cost/quality)*

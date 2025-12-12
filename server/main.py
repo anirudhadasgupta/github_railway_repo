@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 
-from .config import settings
+from .config import require_core_secrets, settings
 from .db import Database
 from .github_client import GitHubClient
 from .indexer import Indexer
@@ -25,6 +25,8 @@ def _default_ref(gh: GitHubClient, owner: str, repo: str, ref: str) -> str:
 
 
 def build_server() -> FastMCP:
+    require_core_secrets()
+
     gh = GitHubClient(settings.github_pat)
     qdrant = QdrantStore(settings.qdrant_url, settings.qdrant_api_key, settings.embedding_dims)
     qdrant.ensure_collection()

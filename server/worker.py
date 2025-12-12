@@ -1,6 +1,6 @@
 import time
 
-from .config import settings
+from .config import require_core_secrets, settings
 from .db import Database
 from .github_client import GitHubClient
 from .indexer import Indexer
@@ -8,6 +8,8 @@ from .qdrant_store import QdrantStore
 
 
 def main() -> None:
+    require_core_secrets()
+
     db = Database(settings.database_url)
     gh = GitHubClient(settings.github_pat)
     qdrant = QdrantStore(settings.qdrant_url, settings.qdrant_api_key, settings.embedding_dims)
