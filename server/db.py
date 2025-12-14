@@ -1,4 +1,6 @@
-import os
+import logging
+import random
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Sequence
@@ -7,6 +9,8 @@ from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
+logger = logging.getLogger("mcp.db")
+
 
 class Database:
     def __init__(self, url: str):
@@ -14,16 +18,40 @@ class Database:
         self._run_migrations()
 
     def _run_migrations(self) -> None:
-        """Run SQL migrations from the migrations directory."""
+        """Run SQL migrations from the migrations directory with retry/backoff."""
         migrations_dir = Path(__file__).parent.parent / "migrations"
         if not migrations_dir.exists():
             return
         migration_files = sorted(migrations_dir.glob("*.sql"))
         for migration_file in migration_files:
             sql_content = migration_file.read_text()
-            with self.connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(sql_content)
+            self._with_retry(
+                lambda sql=sql_content: self._execute_migration(sql),
+                max_attempts=5,
+                context=f"migration:{migration_file.name}",
+            )
+            logger.info("db_migration_applied file=%s", migration_file.name)
+
+    def _execute_migration(self, sql_content: str) -> None:
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql_content)
+
+    def _with_retry(self, fn, max_attempts: int = 5, context: str = "db_op"):
+        """Execute function with exponential backoff retry."""
+        attempt = 0
+        while True:
+            try:
+                return fn()
+            except Exception as e:
+                attempt += 1
+                if attempt >= max_attempts:
+                    logger.error("db_retry_exhausted context=%s attempts=%d error=%s", context, attempt, str(e))
+                    raise
+                jitter = random.uniform(0.5, 1.5)
+                sleep_time = min(2**attempt * jitter, 10)
+                logger.warning("db_retry context=%s attempt=%d sleep=%.2f error=%s", context, attempt, sleep_time, str(e))
+                time.sleep(sleep_time)
 
     @contextmanager
     def connection(self):

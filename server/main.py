@@ -1,11 +1,12 @@
 import asyncio
+import logging
 import os
 import time
 import uuid
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
-from starlette.responses import PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 
 from .config import require_core_secrets, settings
 from .db import Database
@@ -13,6 +14,18 @@ from .github_client import GitHubClient
 from .indexer import Indexer
 from .mcp_utils import mcp_json
 from .qdrant_store import QdrantStore
+
+# Structured logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='{"time":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","message":"%(message)s"}',
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+logger = logging.getLogger("mcp.server")
+
+# Instance diagnostics - proves restart vs re-register
+INSTANCE_ID = str(uuid.uuid4())
+INSTANCE_START_TIME = time.time()
 
 # Session cache with 1-hour TTL for application-level context persistence
 # This persists context across MCP reconnections
@@ -45,11 +58,6 @@ def _get_or_create_session(session_token: Optional[str]) -> tuple[str, Dict[str,
     return new_token, _session_cache[new_token]
 
 
-def _check_allow(token: Optional[str]) -> None:
-    if settings.allow_token and token != settings.allow_token:
-        raise PermissionError("Invalid allow token")
-
-
 def _default_ref(gh: GitHubClient, owner: str, repo: str, ref: str) -> str:
     if ref != "HEAD":
         return ref
@@ -58,12 +66,17 @@ def _default_ref(gh: GitHubClient, owner: str, repo: str, ref: str) -> str:
 
 
 def build_server() -> FastMCP:
+    logger.info("server_startup instance_id=%s", INSTANCE_ID)
     require_core_secrets()
 
+    logger.info("initializing_github_client")
     gh = GitHubClient(settings.github_pat)
+
+    logger.info("initializing_qdrant url=%s", settings.qdrant_url)
     qdrant = QdrantStore(settings.qdrant_url, settings.qdrant_api_key, settings.embedding_dims)
     qdrant.ensure_collection()
 
+    logger.info("initializing_database")
     db = Database(settings.database_url)
     indexer = Indexer(
         github=gh,
@@ -105,7 +118,12 @@ def build_server() -> FastMCP:
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health_check(request):
-        return PlainTextResponse("OK")
+        return JSONResponse({
+            "status": "ok",
+            "instance_id": INSTANCE_ID,
+            "uptime_seconds": round(time.time() - INSTANCE_START_TIME, 2),
+            "active_sessions": len(_session_cache),
+        })
 
     # ---- MCP Resources ----
     # Resources provide discoverable data sources that clients can browse
@@ -135,6 +153,8 @@ def build_server() -> FastMCP:
         """Current session information and TTL settings."""
         import json
         return json.dumps({
+            "instance_id": INSTANCE_ID,
+            "uptime_seconds": round(time.time() - INSTANCE_START_TIME, 2),
             "session_ttl_seconds": SESSION_TTL_SECONDS,
             "heartbeat_interval_seconds": HEARTBEAT_INTERVAL_SECONDS,
             "active_sessions": len(_session_cache),
@@ -174,8 +194,8 @@ def build_server() -> FastMCP:
         })
 
     @mcp.tool(**tool_opts)
-    def gh_list_repos(allow: Optional[str] = None) -> dict:
-        _check_allow(allow)
+    def gh_list_repos() -> dict:
+        logger.info("tool_call: gh_list_repos")
         repos = gh.list_repos()
         return mcp_json(
             {
@@ -193,8 +213,8 @@ def build_server() -> FastMCP:
         )
 
     @mcp.tool(**tool_opts)
-    def gh_repo_outline(repo: str, ref: str = "HEAD", max_entries: int = 2000, allow: Optional[str] = None) -> dict:
-        _check_allow(allow)
+    def gh_repo_outline(repo: str, ref: str = "HEAD", max_entries: int = 2000) -> dict:
+        logger.info("tool_call: gh_repo_outline repo=%s ref=%s", repo, ref)
         owner = settings.github_owner
         ref = _default_ref(gh, owner, repo, ref)
         tree = gh.get_tree_recursive(owner, repo, ref)
@@ -204,9 +224,9 @@ def build_server() -> FastMCP:
 
     @mcp.tool(**tool_opts)
     def gh_get_file_content(
-        repo: str, path: str, ref: str = "HEAD", start_line: int = 1, end_line: int = 400, allow: Optional[str] = None
+        repo: str, path: str, ref: str = "HEAD", start_line: int = 1, end_line: int = 400
     ) -> dict:
-        _check_allow(allow)
+        logger.info("tool_call: gh_get_file_content repo=%s path=%s ref=%s", repo, path, ref)
         owner = settings.github_owner
         ref = _default_ref(gh, owner, repo, ref)
         text = gh.read_text_file(owner, repo, path, ref)
@@ -229,8 +249,8 @@ def build_server() -> FastMCP:
         )
 
     @mcp.tool(**tool_opts)
-    def gh_file_history(repo: str, path: str, ref: str = "HEAD", limit: int = 20, allow: Optional[str] = None) -> dict:
-        _check_allow(allow)
+    def gh_file_history(repo: str, path: str, ref: str = "HEAD", limit: int = 20) -> dict:
+        logger.info("tool_call: gh_file_history repo=%s path=%s ref=%s", repo, path, ref)
         owner = settings.github_owner
         ref = _default_ref(gh, owner, repo, ref)
         commits = gh.list_commits(owner, repo, ref=ref, path=path, limit=limit)
@@ -253,8 +273,8 @@ def build_server() -> FastMCP:
         )
 
     @mcp.tool(**tool_opts)
-    def gh_file_diff(repo: str, base: str, head: str, allow: Optional[str] = None) -> dict:
-        _check_allow(allow)
+    def gh_file_diff(repo: str, base: str, head: str) -> dict:
+        logger.info("tool_call: gh_file_diff repo=%s base=%s head=%s", repo, base, head)
         owner = settings.github_owner
         comp = gh.compare(owner, repo, base=base, head=head)
         files = comp.get("files", []) or []
@@ -281,8 +301,8 @@ def build_server() -> FastMCP:
         )
 
     @mcp.tool(**tool_opts)
-    def gh_commit_history(repo: str, ref: str = "HEAD", limit: int = 30, allow: Optional[str] = None) -> dict:
-        _check_allow(allow)
+    def gh_commit_history(repo: str, ref: str = "HEAD", limit: int = 30) -> dict:
+        logger.info("tool_call: gh_commit_history repo=%s ref=%s", repo, ref)
         owner = settings.github_owner
         ref = _default_ref(gh, owner, repo, ref)
         commits = gh.list_commits(owner, repo, ref=ref, path=None, limit=limit)
@@ -296,8 +316,8 @@ def build_server() -> FastMCP:
         )
 
     @mcp.tool(**tool_opts)
-    def gh_branch_history(repo: str, allow: Optional[str] = None) -> dict:
-        _check_allow(allow)
+    def gh_branch_history(repo: str) -> dict:
+        logger.info("tool_call: gh_branch_history repo=%s", repo)
         owner = settings.github_owner
         branches = gh.list_branches(owner, repo)
         return mcp_json(
@@ -309,8 +329,8 @@ def build_server() -> FastMCP:
         )
 
     @mcp.tool(**tool_opts)
-    def gh_tag_history(repo: str, allow: Optional[str] = None) -> dict:
-        _check_allow(allow)
+    def gh_tag_history(repo: str) -> dict:
+        logger.info("tool_call: gh_tag_history repo=%s", repo)
         owner = settings.github_owner
         tags = gh.list_tags(owner, repo)
         return mcp_json(
@@ -322,8 +342,8 @@ def build_server() -> FastMCP:
         )
 
     @mcp.tool(**tool_opts)
-    def gh_index_repo(repo: str, ref: str = "HEAD", allow: Optional[str] = None) -> dict:
-        _check_allow(allow)
+    def gh_index_repo(repo: str, ref: str = "HEAD") -> dict:
+        logger.info("tool_call: gh_index_repo repo=%s ref=%s", repo, ref)
         owner = settings.github_owner
         ref = _default_ref(gh, owner, repo, ref)
         job_id = str(uuid.uuid4())
@@ -334,8 +354,8 @@ def build_server() -> FastMCP:
         return mcp_json({"job_id": job_id, "status": "PENDING", "owner": owner, "repo": repo, "ref": ref})
 
     @mcp.tool(**tool_opts)
-    def gh_index_status(job_id: str, allow: Optional[str] = None) -> dict:
-        _check_allow(allow)
+    def gh_index_status(job_id: str) -> dict:
+        logger.info("tool_call: gh_index_status job_id=%s", job_id)
         row = db.fetchone(
             "SELECT status, progress, message, owner, repo, ref FROM index_jobs WHERE job_id=%s",
             (job_id,),
@@ -356,12 +376,12 @@ def build_server() -> FastMCP:
         )
 
     @mcp.tool(**search_tool_opts)
-    def keyword_search(repo: str, query: str, limit: int = 20, allow: Optional[str] = None) -> dict:
+    def keyword_search(repo: str, query: str, limit: int = 20) -> dict:
         """
         Search for exact keyword matches in indexed code chunks.
         Use this for finding specific strings, function names, or identifiers.
         """
-        _check_allow(allow)
+        logger.info("tool_call: keyword_search repo=%s query=%s", repo, query)
         results = db.search_keyword(repo, query, limit=limit)
         formatted = [
             {
@@ -379,12 +399,12 @@ def build_server() -> FastMCP:
         return mcp_json({"query": query, "results": formatted})
 
     @mcp.tool(**search_tool_opts)
-    def semantic_search(repo: str, query: str, limit: int = 10, allow: Optional[str] = None) -> dict:
+    def semantic_search(repo: str, query: str, limit: int = 10) -> dict:
         """
         Semantic search using embeddings to find conceptually similar code.
         Use this for natural language queries about code functionality.
         """
-        _check_allow(allow)
+        logger.info("tool_call: semantic_search repo=%s query=%s", repo, query)
         matches = indexer.semantic_search(repo, query, limit=limit)
         hydrated: List[Dict[str, Any]] = []
         for m in matches:
@@ -405,13 +425,13 @@ def build_server() -> FastMCP:
         return mcp_json({"query": query, "results": hydrated})
 
     @mcp.tool(**search_tool_opts)
-    def search(query: str, repo: Optional[str] = None, limit: int = 8, allow: Optional[str] = None) -> dict:
+    def search(query: str, repo: Optional[str] = None, limit: int = 8) -> dict:
         """
         OpenAI deep research compatible search tool.
         Searches indexed code repositories using semantic similarity.
         Returns results with IDs that can be fetched with the fetch tool.
         """
-        _check_allow(allow)
+        logger.info("tool_call: search query=%s repo=%s", query, repo)
         if repo is None:
             repo = ""
         matches = indexer.semantic_search(repo, query, limit=limit) if repo else []
@@ -439,13 +459,13 @@ def build_server() -> FastMCP:
         }
 
     @mcp.tool(**fetch_tool_opts)
-    def fetch(id: str, allow: Optional[str] = None) -> dict:
+    def fetch(id: str) -> dict:
         """
         OpenAI deep research compatible fetch tool.
         Retrieves full content of a code chunk by its ID.
         Use IDs returned from the search tool.
         """
-        _check_allow(allow)
+        logger.info("tool_call: fetch id=%s", id)
         chunk = db.get_chunk(id)
         if not chunk:
             return {
@@ -470,6 +490,7 @@ def main() -> None:
     # Default to streamable-http (recommended by OpenAI for ChatGPT)
     # Set MCP_TRANSPORT=sse for legacy SSE transport if needed
     transport = os.getenv("MCP_TRANSPORT", "http")
+    logger.info("server_listening instance_id=%s port=%d transport=%s", INSTANCE_ID, port, transport)
     server.run(transport=transport, host="0.0.0.0", port=port)
 
 
