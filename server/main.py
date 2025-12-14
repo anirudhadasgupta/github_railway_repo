@@ -381,10 +381,9 @@ def build_server() -> FastMCP:
 def main() -> None:
     server = build_server()
     port = int(os.getenv("PORT", "8000"))
-    # Use streamable-http transport for better session persistence
-    # Clients can resume sessions by sending Mcp-Session-Id header
-    # SSE endpoint also available at /sse for backward compatibility
-    transport = os.getenv("MCP_TRANSPORT", "sse")
+    # Default to streamable-http (recommended by OpenAI for ChatGPT)
+    # Set MCP_TRANSPORT=sse for legacy SSE transport if needed
+    transport = os.getenv("MCP_TRANSPORT", "http")
     server.run(transport=transport, host="0.0.0.0", port=port)
 
 
