@@ -46,7 +46,6 @@ class Settings:
         "node_modules/**,dist/**,build/**,.git/**,vendor/**,**/*.min.js,**/*.lock",
     )
 
-    allow_token: str | None = os.getenv("ALLOW_TOKEN")
 
 
 settings = Settings()

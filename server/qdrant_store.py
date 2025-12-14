@@ -1,9 +1,12 @@
+import logging
 import random
 import time
 from typing import Any, Dict, List, Optional
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
+
+logger = logging.getLogger("mcp.qdrant")
 
 
 class QdrantStore:
@@ -12,13 +15,19 @@ class QdrantStore:
         self.dims = dims
 
     def ensure_collection(self, name: str = "gh_code") -> None:
-        collections = self.client.get_collections().collections
-        if any(c.name == name for c in collections):
-            return
-        self.client.create_collection(
-            collection_name=name,
-            vectors_config=qm.VectorParams(size=self.dims, distance=qm.Distance.COSINE),
-        )
+        """Ensure collection exists with retry/backoff for transient failures."""
+        def _do_ensure():
+            collections = self.client.get_collections().collections
+            if any(c.name == name for c in collections):
+                logger.info("qdrant_collection_exists name=%s", name)
+                return
+            self.client.create_collection(
+                collection_name=name,
+                vectors_config=qm.VectorParams(size=self.dims, distance=qm.Distance.COSINE),
+            )
+            logger.info("qdrant_collection_created name=%s dims=%d", name, self.dims)
+
+        self._with_retry(_do_ensure, max_attempts=5)
 
     def upsert_points(self, collection: str, points: List[qm.PointStruct]) -> None:
         if not points:
