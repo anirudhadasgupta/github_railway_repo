@@ -1,4 +1,6 @@
+import os
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Iterable, List, Optional, Sequence
 
 from psycopg import sql
@@ -9,6 +11,19 @@ from psycopg_pool import ConnectionPool
 class Database:
     def __init__(self, url: str):
         self.pool = ConnectionPool(conninfo=url, kwargs={"autocommit": True}, min_size=1, max_size=5)
+        self._run_migrations()
+
+    def _run_migrations(self) -> None:
+        """Run SQL migrations from the migrations directory."""
+        migrations_dir = Path(__file__).parent.parent / "migrations"
+        if not migrations_dir.exists():
+            return
+        migration_files = sorted(migrations_dir.glob("*.sql"))
+        for migration_file in migration_files:
+            sql_content = migration_file.read_text()
+            with self.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql_content)
 
     @contextmanager
     def connection(self):

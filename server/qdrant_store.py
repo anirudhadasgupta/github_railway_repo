@@ -46,15 +46,15 @@ class QdrantStore:
         if repo:
             filters = qm.Filter(must=[qm.FieldCondition(key="repo", match=qm.MatchValue(value=repo))])
         res = self._with_retry(
-            lambda: self.client.search(
+            lambda: self.client.query_points(
                 collection_name=collection,
-                query_vector=vector,
+                query=vector,
                 query_filter=filters,
                 limit=limit,
             )
         )
         out: List[Dict[str, Any]] = []
-        for item in res:
+        for item in res.points:
             payload = item.payload or {}
             out.append(
                 {
