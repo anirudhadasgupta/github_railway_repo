@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 import uuid
@@ -17,6 +18,10 @@ from .qdrant_store import QdrantStore
 # This persists context across MCP reconnections
 SESSION_TTL_SECONDS = 3600  # 1 hour
 _session_cache: Dict[str, Dict[str, Any]] = {}
+
+# Connection keepalive tracking
+_last_heartbeat: Dict[str, float] = {}
+HEARTBEAT_INTERVAL_SECONDS = 30
 
 
 def _get_or_create_session(session_token: Optional[str]) -> tuple[str, Dict[str, Any]]:
@@ -79,16 +84,79 @@ def build_server() -> FastMCP:
     Prefer semantic_search + gh_get_file_content for answering questions.
     Use keyword_search for exact string matches.
     Use file_history and gh_file_diff when reasoning about changes.
+
+    RESOURCES: Use list_resources to discover available data sources.
     """
 
     # Enable stateless_http to handle OpenAI's DELETE requests that terminate sessions
     # Session persistence is handled at application level via _session_cache
     mcp = FastMCP(name="github-private-repo-mcp", instructions=instructions, stateless_http=True)
+
+    # Tool annotations for OpenAI compatibility
+    # readOnlyHint: indicates tools don't modify state
     tool_opts = {"annotations": {"readOnlyHint": True}}
+
+    # Search tool annotations per OpenAI specifications
+    # openWorldHint: indicates the tool searches external/dynamic data
+    search_tool_opts = {"annotations": {"readOnlyHint": True, "openWorldHint": True}}
+
+    # Fetch tool annotations - retrieves specific content by ID
+    fetch_tool_opts = {"annotations": {"readOnlyHint": True}}
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health_check(request):
         return PlainTextResponse("OK")
+
+    # ---- MCP Resources ----
+    # Resources provide discoverable data sources that clients can browse
+
+    @mcp.resource("github://repos")
+    def resource_repos() -> str:
+        """List of accessible GitHub repositories."""
+        repos = gh.list_repos()
+        repo_list = [
+            {"owner": r["owner"]["login"], "name": r["name"], "private": r.get("private", False)}
+            for r in repos
+        ]
+        import json
+        return json.dumps({"repos": repo_list}, ensure_ascii=False)
+
+    @mcp.resource("github://indexed")
+    def resource_indexed_repos() -> str:
+        """List of repositories that have been indexed for semantic search."""
+        rows = db.fetchall(
+            "SELECT DISTINCT owner, name FROM repos WHERE indexed_at IS NOT NULL ORDER BY name"
+        )
+        import json
+        return json.dumps({"indexed_repos": [{"owner": r["owner"], "name": r["name"]} for r in rows]}, ensure_ascii=False)
+
+    @mcp.resource("github://session")
+    def resource_session_info() -> str:
+        """Current session information and TTL settings."""
+        import json
+        return json.dumps({
+            "session_ttl_seconds": SESSION_TTL_SECONDS,
+            "heartbeat_interval_seconds": HEARTBEAT_INTERVAL_SECONDS,
+            "active_sessions": len(_session_cache),
+        }, ensure_ascii=False)
+
+    # ---- Heartbeat/Keepalive Tool ----
+    @mcp.tool(**tool_opts)
+    def heartbeat(session_token: Optional[str] = None) -> dict:
+        """
+        Send a heartbeat to keep the connection alive. Call periodically (every 30s)
+        to prevent connection timeouts. Returns session status.
+        """
+        now = time.time()
+        if session_token:
+            _last_heartbeat[session_token] = now
+            if session_token in _session_cache:
+                _session_cache[session_token]["_last_access"] = now
+        return mcp_json({
+            "status": "alive",
+            "timestamp": now,
+            "session_valid": session_token in _session_cache if session_token else False,
+        })
 
     @mcp.tool(**tool_opts)
     def get_session(session_token: Optional[str] = None) -> dict:
@@ -287,8 +355,12 @@ def build_server() -> FastMCP:
             }
         )
 
-    @mcp.tool(**tool_opts)
+    @mcp.tool(**search_tool_opts)
     def keyword_search(repo: str, query: str, limit: int = 20, allow: Optional[str] = None) -> dict:
+        """
+        Search for exact keyword matches in indexed code chunks.
+        Use this for finding specific strings, function names, or identifiers.
+        """
         _check_allow(allow)
         results = db.search_keyword(repo, query, limit=limit)
         formatted = [
@@ -306,8 +378,12 @@ def build_server() -> FastMCP:
         ]
         return mcp_json({"query": query, "results": formatted})
 
-    @mcp.tool(**tool_opts)
+    @mcp.tool(**search_tool_opts)
     def semantic_search(repo: str, query: str, limit: int = 10, allow: Optional[str] = None) -> dict:
+        """
+        Semantic search using embeddings to find conceptually similar code.
+        Use this for natural language queries about code functionality.
+        """
         _check_allow(allow)
         matches = indexer.semantic_search(repo, query, limit=limit)
         hydrated: List[Dict[str, Any]] = []
@@ -328,8 +404,13 @@ def build_server() -> FastMCP:
             )
         return mcp_json({"query": query, "results": hydrated})
 
-    @mcp.tool(**tool_opts)
+    @mcp.tool(**search_tool_opts)
     def search(query: str, repo: Optional[str] = None, limit: int = 8, allow: Optional[str] = None) -> dict:
+        """
+        OpenAI deep research compatible search tool.
+        Searches indexed code repositories using semantic similarity.
+        Returns results with IDs that can be fetched with the fetch tool.
+        """
         _check_allow(allow)
         if repo is None:
             repo = ""
@@ -357,8 +438,13 @@ def build_server() -> FastMCP:
             ]
         }
 
-    @mcp.tool(**tool_opts)
+    @mcp.tool(**fetch_tool_opts)
     def fetch(id: str, allow: Optional[str] = None) -> dict:
+        """
+        OpenAI deep research compatible fetch tool.
+        Retrieves full content of a code chunk by its ID.
+        Use IDs returned from the search tool.
+        """
         _check_allow(allow)
         chunk = db.get_chunk(id)
         if not chunk:
