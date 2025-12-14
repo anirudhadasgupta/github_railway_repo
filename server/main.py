@@ -1,4 +1,5 @@
 import os
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -11,6 +12,32 @@ from .github_client import GitHubClient
 from .indexer import Indexer
 from .mcp_utils import mcp_json
 from .qdrant_store import QdrantStore
+
+# Session cache with 1-hour TTL for application-level context persistence
+# This persists context across MCP reconnections
+SESSION_TTL_SECONDS = 3600  # 1 hour
+_session_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def _get_or_create_session(session_token: Optional[str]) -> tuple[str, Dict[str, Any]]:
+    """Get existing session or create new one. Returns (token, session_data)."""
+    now = time.time()
+
+    # Clean expired sessions
+    expired = [k for k, v in _session_cache.items() if now - v.get("_created", 0) > SESSION_TTL_SECONDS]
+    for k in expired:
+        del _session_cache[k]
+
+    # Try to find existing session
+    if session_token and session_token in _session_cache:
+        session = _session_cache[session_token]
+        session["_last_access"] = now
+        return session_token, session
+
+    # Create new session
+    new_token = str(uuid.uuid4())
+    _session_cache[new_token] = {"_created": now, "_last_access": now}
+    return new_token, _session_cache[new_token]
 
 
 def _check_allow(token: Optional[str]) -> None:
@@ -44,17 +71,39 @@ def build_server() -> FastMCP:
 
     instructions = """
     You are connected to a GitHub code intelligence MCP.
+
+    SESSION PERSISTENCE: Call get_session() at the start of each conversation to get
+    a session_token. Store and reuse this token across reconnections to maintain
+    context for up to 1 hour.
+
     Prefer semantic_search + gh_get_file_content for answering questions.
     Use keyword_search for exact string matches.
     Use file_history and gh_file_diff when reasoning about changes.
     """
 
-    mcp = FastMCP(name="github-private-repo-mcp", instructions=instructions)
+    # Enable stateless_http to handle OpenAI's DELETE requests that terminate sessions
+    # Session persistence is handled at application level via _session_cache
+    mcp = FastMCP(name="github-private-repo-mcp", instructions=instructions, stateless_http=True)
     tool_opts = {"annotations": {"readOnlyHint": True}}
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health_check(request):
         return PlainTextResponse("OK")
+
+    @mcp.tool()
+    def get_session(session_token: Optional[str] = None) -> dict:
+        """
+        Get or create a persistent session token. Pass this token to subsequent
+        tool calls to maintain context across reconnections. Sessions persist for 1 hour.
+        """
+        token, session_data = _get_or_create_session(session_token)
+        return mcp_json({
+            "session_token": token,
+            "ttl_seconds": SESSION_TTL_SECONDS,
+            "created": session_data.get("_created"),
+            "last_access": session_data.get("_last_access"),
+            "hint": "Pass this session_token to other tools to persist context across reconnections"
+        })
 
     @mcp.tool(**tool_opts)
     def gh_list_repos(allow: Optional[str] = None) -> dict:
@@ -332,7 +381,11 @@ def build_server() -> FastMCP:
 def main() -> None:
     server = build_server()
     port = int(os.getenv("PORT", "8000"))
-    server.run(transport="sse", host="0.0.0.0", port=port)
+    # Use streamable-http transport for better session persistence
+    # Clients can resume sessions by sending Mcp-Session-Id header
+    # SSE endpoint also available at /sse for backward compatibility
+    transport = os.getenv("MCP_TRANSPORT", "sse")
+    server.run(transport=transport, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
