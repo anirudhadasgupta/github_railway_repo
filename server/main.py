@@ -90,7 +90,7 @@ def build_server() -> FastMCP:
     async def health_check(request):
         return PlainTextResponse("OK")
 
-    @mcp.tool()
+    @mcp.tool(**tool_opts)
     def get_session(session_token: Optional[str] = None) -> dict:
         """
         Get or create a persistent session token. Pass this token to subsequent
