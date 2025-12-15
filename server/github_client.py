@@ -111,7 +111,7 @@ class GitHubClient:
 
         Args:
             query: Search query (supports GitHub qualifiers like path:, language:, extension:)
-            owner: Optional owner to scope search (adds user: qualifier)
+            owner: Optional owner to scope search (adds user: qualifier only if no repo:/user:/org: in query)
             repo: Optional repo to scope search (adds repo: qualifier)
             per_page: Results per page (max 100)
 
@@ -119,10 +119,14 @@ class GitHubClient:
             GitHub search response with items array
         """
         # Build query with optional scoping
+        # Don't add user: if query already has repo:, user:, or org: qualifiers
         q_parts = [query]
+        has_scope = any(q in query.lower() for q in ["repo:", "user:", "org:"])
+
         if repo and owner:
-            q_parts.append(f"repo:{owner}/{repo}")
-        elif owner:
+            if not has_scope:
+                q_parts.append(f"repo:{owner}/{repo}")
+        elif owner and not has_scope:
             q_parts.append(f"user:{owner}")
 
         full_query = " ".join(q_parts)
