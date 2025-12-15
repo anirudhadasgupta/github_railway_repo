@@ -27,6 +27,11 @@ logger = logging.getLogger("mcp.server")
 INSTANCE_ID = str(uuid.uuid4())
 INSTANCE_START_TIME = time.time()
 
+# HTTP path discovery helpers (use env overrides when provided)
+STREAMABLE_HTTP_PATH = os.getenv("FASTMCP_STREAMABLE_HTTP_PATH", "/mcp")
+SSE_PATH = os.getenv("FASTMCP_SSE_PATH", "/sse")
+MESSAGE_PATH = os.getenv("FASTMCP_MESSAGE_PATH", "/messages/")
+
 # Session cache with 1-hour TTL for application-level context persistence
 # This persists context across MCP reconnections
 SESSION_TTL_SECONDS = 3600  # 1 hour
@@ -63,6 +68,25 @@ def _default_ref(gh: GitHubClient, owner: str, repo: str, ref: str) -> str:
         return ref
     meta = gh.get_repo(owner, repo)
     return meta.get("default_branch") or "main"
+
+
+def _build_discovery(base_url: Optional[str] = None, root_path: str = "") -> dict:
+    """Return current transport entrypoints for recovery/discovery flows."""
+    transport = os.getenv("MCP_TRANSPORT", "http")
+    prefix = root_path.rstrip("/")
+
+    def full_path(path: str) -> str:
+        if base_url:
+            return f"{base_url.rstrip('/')}{prefix}{path}"
+        return f"{prefix}{path}" if prefix else path
+
+    return {
+        "transport": transport,
+        "root_path": prefix or "/",
+        "streamable_http": full_path(STREAMABLE_HTTP_PATH),
+        "sse": full_path(SSE_PATH),
+        "messages": full_path(MESSAGE_PATH),
+    }
 
 
 def build_server() -> FastMCP:
@@ -158,12 +182,16 @@ def build_server() -> FastMCP:
     @mcp.custom_route("/help", methods=["GET"])
     async def help_route(request):
         """Lightweight troubleshooting guide for tool retries."""
-        return JSONResponse(help_payload)
+        discovery = _build_discovery(
+            base_url=str(request.base_url), root_path=request.scope.get("root_path", "")
+        )
+        return JSONResponse({**help_payload, "discovery": discovery})
 
     @mcp.tool(**help_tool_opts)
     def help() -> dict:
         """Return the error recovery playbook for retrying MCP tool calls."""
-        return mcp_json(help_payload)
+        discovery = _build_discovery(root_path=os.getenv("ROOT_PATH", ""))
+        return mcp_json({**help_payload, "discovery": discovery})
 
     # ---- MCP Resources ----
     # Resources provide discoverable data sources that clients can browse
