@@ -15,7 +15,7 @@ startCommand = "python -m server.main"
 healthcheckPath = "/health"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
-numReplicas = 2
+numReplicas = 1
 
 [deploy.env]
 PORT = "8000"
