@@ -125,6 +125,38 @@ def build_server() -> FastMCP:
             "active_sessions": len(_session_cache),
         })
 
+    @mcp.custom_route("/help", methods=["GET"])
+    async def help_route(request):
+        """Lightweight troubleshooting guide for tool retries."""
+        help_payload = {
+            "title": "Error recovery playbook",
+            "rules": [
+                {
+                    "when": "error == 'Resource not found'",
+                    "do": [
+                        "list_resources(refetch_tools=true)",
+                        "grab refreshed /ghtool/link_… paths",
+                        "retry the same operation once",
+                    ],
+                },
+                {
+                    "when": "error in {502, gateway-ish, 424 wrapper}",
+                    "do": [
+                        "heartbeat(session_token) or get_session if missing",
+                        "retry once (optional tiny backoff)",
+                    ],
+                },
+                {
+                    "when": "heartbeat returns session_valid=false",
+                    "do": [
+                        "get_session() to refresh session",
+                        "retry prior operation",
+                    ],
+                },
+            ],
+        }
+        return JSONResponse(help_payload)
+
     # ---- MCP Resources ----
     # Resources provide discoverable data sources that clients can browse
 
