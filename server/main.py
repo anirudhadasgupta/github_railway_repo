@@ -89,6 +89,29 @@ def _build_discovery(base_url: Optional[str] = None, root_path: str = "") -> dic
     }
 
 
+def _base_capabilities(discovery: dict) -> dict:
+    """
+    Minimal server manifest used by both HTTP routes and MCP tools.
+    NOTE: This does not (and cannot) control OpenAI/ChatGPT's rotating wrapper
+    path (e.g. /ghtool/link_*). Clients must re-discover tools when wrapper
+    routes change.
+    """
+    return {
+        "name": "github-private-repo-mcp",
+        "instance_id": INSTANCE_ID,
+        "uptime_seconds": round(time.time() - INSTANCE_START_TIME, 2),
+        "session_ttl_seconds": SESSION_TTL_SECONDS,
+        "heartbeat_interval_seconds": HEARTBEAT_INTERVAL_SECONDS,
+        "discovery": discovery,
+        "http_endpoints": {
+            "health": "/health",
+            "help": "/help",
+            "help_well_known": "/.well-known/mcp/help",
+            "capabilities": "/capabilities",
+        },
+    }
+
+
 def build_server() -> FastMCP:
     logger.info("server_startup instance_id=%s", INSTANCE_ID)
     require_core_secrets()
@@ -111,6 +134,8 @@ def build_server() -> FastMCP:
         embedding_dims=settings.embedding_dims,
     )
 
+    # Keep the recovery playbook embedded here so the client/model can recover
+    # even if /help is temporarily unreachable during tool-wrapper rotation.
     instructions = """
     You are connected to a GitHub code intelligence MCP.
 
@@ -123,6 +148,21 @@ def build_server() -> FastMCP:
     Use file_history and gh_file_diff when reasoning about changes.
 
     RESOURCES: Use list_resources to discover available data sources.
+
+    ERROR RECOVERY PLAYBOOK (tool calls failing):
+    - If you get "Resource not found" (often caused by tool-wrapper/URI rotation):
+      1) re-discover tools (tools/list or list_resources(refetch_tools=true))
+      2) DO NOT reuse cached /link_* paths
+      3) retry the same operation once
+    - If you get 502/Bad Gateway/timeout/424 wrapper:
+      1) heartbeat(session_token) (or get_session() if missing)
+      2) retry once (optional tiny backoff)
+    - If heartbeat says session_valid=false:
+      1) get_session() to refresh
+      2) retry prior operation
+
+    You can always call help() to retrieve the playbook as JSON, and capabilities()
+    to retrieve current server/discovery info.
     """
 
     # Enable stateless_http to handle OpenAI's DELETE requests that terminate sessions
@@ -155,8 +195,8 @@ def build_server() -> FastMCP:
             {
                 "when": "error == 'Resource not found'",
                 "do": [
-                    "list_resources(refetch_tools=true)",
-                    "grab refreshed /ghtool/link_… paths",
+                    "re-discover tools (tools/list or list_resources(refetch_tools=true))",
+                    "DO NOT reuse cached /link_* wrapper paths",
                     "retry the same operation once",
                 ],
             },
@@ -185,13 +225,41 @@ def build_server() -> FastMCP:
         discovery = _build_discovery(
             base_url=str(request.base_url), root_path=request.scope.get("root_path", "")
         )
-        return JSONResponse({**help_payload, "discovery": discovery})
+        caps = _base_capabilities(discovery)
+        return JSONResponse({**help_payload, "capabilities": caps})
+
+    # Stable, conventional alias that survives client-side wrapper rotation because it
+    # is served directly by your Railway domain.
+    @mcp.custom_route("/.well-known/mcp/help", methods=["GET"])
+    async def help_well_known_route(request):
+        discovery = _build_discovery(
+            base_url=str(request.base_url), root_path=request.scope.get("root_path", "")
+        )
+        caps = _base_capabilities(discovery)
+        return JSONResponse({**help_payload, "capabilities": caps})
+
+    @mcp.custom_route("/capabilities", methods=["GET"])
+    async def capabilities_route(request):
+        discovery = _build_discovery(
+            base_url=str(request.base_url), root_path=request.scope.get("root_path", "")
+        )
+        return JSONResponse(_base_capabilities(discovery))
 
     @mcp.tool(**help_tool_opts)
     def help() -> dict:
         """Return the error recovery playbook for retrying MCP tool calls."""
         discovery = _build_discovery(root_path=os.getenv("ROOT_PATH", ""))
-        return mcp_json({**help_payload, "discovery": discovery})
+        caps = _base_capabilities(discovery)
+        return mcp_json({**help_payload, "capabilities": caps})
+
+    @mcp.tool(**tool_opts)
+    def capabilities() -> dict:
+        """
+        Return server manifest + discovery hints. Useful for clients after tool-wrapper
+        rotation or transport changes.
+        """
+        discovery = _build_discovery(root_path=os.getenv("ROOT_PATH", ""))
+        return mcp_json(_base_capabilities(discovery))
 
     # ---- MCP Resources ----
     # Resources provide discoverable data sources that clients can browse
