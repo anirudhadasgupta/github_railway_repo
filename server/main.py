@@ -149,7 +149,7 @@ def build_server() -> FastMCP:
 
     RESOURCES: Use list_resources to discover available data sources.
 
-    ERROR RECOVERY PLAYBOOK (tool calls failing):
+    ERROR RECOVERY PLAYBOOK (available without calling help):
     - If you get "Resource not found" (often caused by tool-wrapper/URI rotation):
       1) re-discover tools (tools/list or list_resources(refetch_tools=true))
       2) DO NOT reuse cached /link_* paths
@@ -161,8 +161,8 @@ def build_server() -> FastMCP:
       1) get_session() to refresh
       2) retry prior operation
 
-    You can always call help() to retrieve the playbook as JSON, and capabilities()
-    to retrieve current server/discovery info.
+    Discovery hints: /help and /.well-known/mcp/help return this playbook plus
+    capabilities metadata; /capabilities returns discovery info only.
     """
 
     # Enable stateless_http to handle OpenAI's DELETE requests that terminate sessions
