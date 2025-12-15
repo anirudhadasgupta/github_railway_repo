@@ -6,7 +6,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from .config import require_core_secrets, settings
 from .db import Database
@@ -139,56 +139,60 @@ def build_server() -> FastMCP:
     instructions = """
     You are connected to a GitHub code intelligence MCP.
 
-    SESSION PERSISTENCE: Call get_session() at the start of each conversation to get
-    a session_token. Store and reuse this token across reconnections to maintain
-    context for up to 1 hour.
+    CRITICAL - CONNECTION STABILITY:
+    ChatGPT's internal session timeout (~1 hour) can cause URI rotation and tool
+    unavailability. Follow these rules to maintain stable connections:
 
-    WRAPPER DISCOVERY (MCP metadata for ghtool/* calls):
-    - Before calling any ghtool/* function, call api_tool.list_resources with
-      refetch_tools=true to discover the current wrapper path; do not reuse or
-      copy /link_* paths from prior turns.
-    - If a ghtool call returns "Resource not found", immediately rerun
-      list_resources(refetch_tools=true) and retry once with the newly discovered
-      path.
-    - If a ghtool call fails with 502 or 424, call heartbeat (or get_session if
-      missing) and retry once.
+    1. SESSION PERSISTENCE: Call get_session() at conversation start. Store the
+       session_token and pass it to subsequent tool calls.
 
-    Prefer semantic_search + gh_get_file_content for answering questions.
-    Use keyword_search for exact string matches.
-    Use file_history and gh_file_diff when reasoning about changes.
+    2. PROACTIVE REDISCOVERY: Before EVERY ghtool/* call:
+       - Call tools/list or list_resources(refetch_tools=true) first
+       - NEVER reuse /link_* wrapper paths from prior turns
+       - Always use freshly discovered paths
+
+    3. ERROR RECOVERY (URI ROTATION):
+       When you see "Resource not found", 424, or 502 errors:
+       a) Call reconnect(session_token) to re-establish connection
+       b) Call tools/list to rediscover all tools
+       c) Retry the operation with fresh paths
+       d) Do NOT retry more than once without rediscovery
+
+    4. LONG CONVERSATIONS:
+       - Call heartbeat(session_token) every 5-10 tool calls
+       - If tools become unavailable mid-response, call reconnect()
+       - After reconnect, always rediscover before using tools
+
+    TOOL USAGE:
+    - semantic_search + gh_get_file_content: for answering code questions
+    - keyword_search: for exact string/identifier matches
+    - file_history + gh_file_diff: for reasoning about changes
+    - reconnect: when connection errors occur
+    - heartbeat: to keep session alive
 
     RESOURCES: Use list_resources to discover available data sources.
 
-    ERROR RECOVERY PLAYBOOK (available without calling help):
-    - If you get "Resource not found" (often caused by tool-wrapper/URI rotation):
-      1) re-discover tools (tools/list or list_resources(refetch_tools=true))
-      2) DO NOT reuse cached /link_* paths
-      3) retry the same operation once
-    - If you get 502/Bad Gateway/timeout/424 wrapper:
-      1) heartbeat(session_token) (or get_session() if missing)
-      2) retry once (optional tiny backoff)
-    - If heartbeat says session_valid=false:
-      1) get_session() to refresh
-      2) retry prior operation
-
-    Discovery hints: /help and /.well-known/mcp/help return this playbook plus
-    capabilities metadata; /capabilities returns discovery info only.
+    Discovery: /help and /.well-known/mcp/help return this playbook;
+    /capabilities returns transport discovery info.
     """
 
     # Enable stateless_http to handle OpenAI's DELETE requests that terminate sessions
     # Session persistence is handled at application level via _session_cache
     mcp = FastMCP(name="github-private-repo-mcp", instructions=instructions, stateless_http=True)
 
-    # Tool annotations for OpenAI compatibility
-    # readOnlyHint: indicates tools don't modify state
-    tool_opts = {"annotations": {"readOnlyHint": True, "safe": True}}
+    # Tool annotations for OpenAI/ChatGPT compatibility
+    # readOnlyHint: true = skips "Continue" confirmation prompt in ChatGPT
+    # openWorldHint: indicates interaction with external data sources
+    # destructiveHint: false = not a destructive operation (default is true)
+    # idempotentHint: true = repeated calls produce same result
+    tool_opts = {"annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}}
 
     # Search tool annotations per OpenAI specifications
     # openWorldHint: indicates the tool searches external/dynamic data
-    search_tool_opts = {"annotations": {"readOnlyHint": True, "openWorldHint": True, "safe": True}}
+    search_tool_opts = {"annotations": {"readOnlyHint": True, "openWorldHint": True, "destructiveHint": False}}
 
     # Fetch tool annotations - retrieves specific content by ID
-    fetch_tool_opts = {"annotations": {"readOnlyHint": True, "safe": True}}
+    fetch_tool_opts = {"annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}}
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health_check(request):
@@ -223,41 +227,64 @@ def build_server() -> FastMCP:
         })
 
     help_payload = {
-        "title": "Error recovery playbook",
+        "title": "Connection stability & error recovery playbook",
+        "critical_note": "ChatGPT's internal session timeout (~1 hour) causes URI rotation. Always rediscover tools before use.",
         "rules": [
             {
                 "when": "before calling any ghtool/* tool",
+                "priority": "HIGH",
                 "do": [
-                    "list_resources(refetch_tools=true) via api_tool before choosing the wrapper path",
-                    "do not reuse cached /link_* wrapper paths from prior turns",
+                    "Call tools/list or list_resources(refetch_tools=true) FIRST",
+                    "NEVER reuse /link_* wrapper paths from prior turns",
+                    "Always use freshly discovered paths",
                 ],
             },
             {
-                "when": "error == 'Resource not found'",
+                "when": "error == 'Resource not found' or tools unavailable",
+                "priority": "CRITICAL",
                 "do": [
-                    "re-discover tools (tools/list or list_resources(refetch_tools=true))",
-                    "DO NOT reuse cached /link_* wrapper paths",
-                    "retry the same operation once",
+                    "1. Call reconnect(session_token) to re-establish connection",
+                    "2. Call tools/list to rediscover all available tools",
+                    "3. Retry operation with fresh paths",
+                    "4. Do NOT retry more than once without rediscovery",
                 ],
             },
             {
-                "when": "error in {502, gateway-ish, 424 wrapper}",
+                "when": "error in {502, Bad Gateway, timeout, 424}",
+                "priority": "HIGH",
                 "do": [
-                    "heartbeat(session_token) or get_session if missing",
-                    "retry once (optional tiny backoff)",
+                    "1. Call reconnect(session_token)",
+                    "2. Call tools/list to rediscover",
+                    "3. Retry once with fresh paths",
                 ],
             },
             {
-                "when": "heartbeat returns session_valid=false",
+                "when": "long conversation (10+ tool calls)",
+                "priority": "MEDIUM",
                 "do": [
-                    "get_session() to refresh session",
-                    "retry prior operation",
+                    "Call heartbeat(session_token) periodically",
+                    "If tools become unavailable, call reconnect() immediately",
+                ],
+            },
+            {
+                "when": "session_valid=false or session expired",
+                "priority": "HIGH",
+                "do": [
+                    "1. Call get_session() to get fresh token",
+                    "2. Call tools/list to rediscover",
+                    "3. Retry prior operation",
                 ],
             },
         ],
+        "recovery_tools": {
+            "reconnect": "Re-establish connection after URI rotation or errors",
+            "heartbeat": "Keep session alive, check session validity",
+            "get_session": "Create or refresh session token",
+            "help": "Get this playbook",
+        },
     }
 
-    help_tool_opts = {"annotations": {"readOnlyHint": True, "safe": True}}
+    help_tool_opts = {"annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}}
 
     @mcp.custom_route("/help", methods=["GET"])
     async def help_route(request):
@@ -284,6 +311,90 @@ def build_server() -> FastMCP:
             base_url=str(request.base_url), root_path=request.scope.get("root_path", "")
         )
         return JSONResponse(_base_capabilities(discovery))
+
+    # SSE fallback endpoint for ChatGPT reconnection after long idle (~1 hour)
+    # ChatGPT's internal session timeout causes it to attempt SSE reconnection
+    # instead of simply refreshing OAuth tokens. This endpoint prevents 405 errors
+    # and guides the client back to the correct transport.
+    @mcp.custom_route("/sse", methods=["GET"])
+    async def sse_fallback_route(request):
+        """
+        SSE fallback for ChatGPT reconnection attempts after long idle periods.
+        Returns a minimal SSE stream with reconnection guidance.
+        """
+        logger.info("sse_fallback_triggered - ChatGPT attempting SSE reconnection")
+
+        async def sse_reconnect_stream():
+            import json
+            # Send a reconnection guidance event
+            reconnect_msg = {
+                "type": "reconnect_required",
+                "message": "Session expired. Please use streamable HTTP transport at /mcp",
+                "transport": "http",
+                "endpoint": STREAMABLE_HTTP_PATH,
+                "action": "Call tools/list to rediscover available tools",
+            }
+            yield f"event: message\ndata: {json.dumps(reconnect_msg)}\n\n"
+            # Send server capabilities
+            discovery = _build_discovery(root_path=request.scope.get("root_path", ""))
+            caps = _base_capabilities(discovery)
+            yield f"event: capabilities\ndata: {json.dumps(caps)}\n\n"
+            # Close the stream
+            yield f"event: close\ndata: {json.dumps({'reason': 'use_http_transport'})}\n\n"
+
+        return StreamingResponse(
+            sse_reconnect_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+
+    # Also handle /mcp SSE requests that might come after idle
+    @mcp.custom_route("/mcp", methods=["GET"])
+    async def mcp_sse_fallback_route(request):
+        """
+        Handle SSE GET requests to /mcp endpoint (ChatGPT reconnection attempts).
+        The main /mcp POST endpoint is handled by FastMCP's streamable HTTP transport.
+        """
+        accept_header = request.headers.get("accept", "")
+        if "text/event-stream" in accept_header:
+            logger.info("mcp_sse_fallback_triggered - ChatGPT SSE reconnection to /mcp")
+
+            async def sse_reconnect_stream():
+                import json
+                reconnect_msg = {
+                    "type": "reconnect_required",
+                    "message": "Use POST to /mcp for tool calls. Call tools/list to rediscover.",
+                    "transport": "http",
+                    "method": "POST",
+                }
+                yield f"event: message\ndata: {json.dumps(reconnect_msg)}\n\n"
+                discovery = _build_discovery(root_path=request.scope.get("root_path", ""))
+                caps = _base_capabilities(discovery)
+                yield f"event: capabilities\ndata: {json.dumps(caps)}\n\n"
+                yield f"event: close\ndata: {json.dumps({'reason': 'use_post_method'})}\n\n"
+
+            return StreamingResponse(
+                sse_reconnect_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                }
+            )
+        # For non-SSE GET requests, return capabilities
+        discovery = _build_discovery(
+            base_url=str(request.base_url), root_path=request.scope.get("root_path", "")
+        )
+        return JSONResponse({
+            "status": "ok",
+            "message": "Use POST for MCP tool calls",
+            "capabilities": _base_capabilities(discovery),
+        })
 
     @mcp.tool(**help_tool_opts)
     def help() -> dict:
@@ -367,6 +478,39 @@ def build_server() -> FastMCP:
             "created": session_data.get("_created"),
             "last_access": session_data.get("_last_access"),
             "hint": "Pass this session_token to other tools to persist context across reconnections"
+        })
+
+    @mcp.tool(**tool_opts)
+    def reconnect(session_token: Optional[str] = None) -> dict:
+        """
+        Re-establish connection after URI rotation or connection errors.
+        Call this when you encounter 'Resource not found', 424, or 502 errors.
+        Returns fresh session info and tool rediscovery instructions.
+
+        IMPORTANT: After calling reconnect, you MUST call tools/list or
+        list_resources(refetch_tools=true) to rediscover the current tool paths.
+        Do NOT reuse cached /link_* wrapper paths from prior turns.
+        """
+        logger.info("tool_call: reconnect session_token=%s", session_token)
+        token, session_data = _get_or_create_session(session_token)
+        now = time.time()
+        _last_heartbeat[token] = now
+        session_data["_last_access"] = now
+
+        discovery = _build_discovery(root_path=os.getenv("ROOT_PATH", ""))
+        return mcp_json({
+            "status": "reconnected",
+            "session_token": token,
+            "session_valid": True,
+            "ttl_seconds": SESSION_TTL_SECONDS,
+            "discovery": discovery,
+            "next_steps": [
+                "1. Call tools/list to rediscover available tools",
+                "2. Do NOT reuse cached /link_* wrapper paths",
+                "3. Retry the failed operation with fresh tool paths",
+            ],
+            "instance_id": INSTANCE_ID,
+            "uptime_seconds": round(now - INSTANCE_START_TIME, 2),
         })
 
     @mcp.tool(**tool_opts)
