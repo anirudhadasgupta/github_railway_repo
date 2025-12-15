@@ -102,30 +102,40 @@ class GitHubClient:
     def search_code(
         self,
         query: str,
-        owner: Optional[str] = None,
-        repo: Optional[str] = None,
+        owner: str,
         per_page: int = 10,
     ) -> Dict[str, Any]:
         """
-        Search code using GitHub Code Search API.
+        Search code using GitHub Code Search API, always scoped to owner's repos.
 
         Args:
             query: Search query (supports GitHub qualifiers like path:, language:, extension:)
-            owner: Optional owner to scope search (adds user: qualifier)
-            repo: Optional repo to scope search (adds repo: qualifier)
+                   If repo: is specified, it will be rewritten to owner's repo
+            owner: Owner to scope all searches to (required)
             per_page: Results per page (max 100)
 
         Returns:
             GitHub search response with items array
         """
-        # Build query with optional scoping
-        q_parts = [query]
-        if repo and owner:
-            q_parts.append(f"repo:{owner}/{repo}")
-        elif owner:
-            q_parts.append(f"user:{owner}")
+        import re
 
-        full_query = " ".join(q_parts)
+        # Always scope to owner's repos - rewrite any repo: qualifiers
+        # repo:somerepo -> repo:owner/somerepo
+        # repo:other/somerepo -> repo:owner/somerepo (strip external owner)
+        def rewrite_repo(match):
+            repo_spec = match.group(1)
+            # Extract just the repo name (strip any owner prefix)
+            repo_name = repo_spec.split("/")[-1]
+            return f"repo:{owner}/{repo_name}"
+
+        # Rewrite repo: qualifiers to use our owner
+        query = re.sub(r"repo:([^\s]+)", rewrite_repo, query, flags=re.IGNORECASE)
+
+        # Remove any user: or org: qualifiers (we'll add our own)
+        query = re.sub(r"(user|org):[^\s]+\s*", "", query, flags=re.IGNORECASE).strip()
+
+        # Always scope to owner's repos
+        full_query = f"{query} user:{owner}"
 
         params = {
             "q": full_query,
