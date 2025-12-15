@@ -155,8 +155,9 @@ class Database:
     def get_chunk(self, chunk_id: str) -> Optional[Any]:
         return self.fetchone(
             """
-            SELECT c.chunk_id, c.repo_name, c.ref, c.path, c.start_line, c.end_line, c.text
+            SELECT c.chunk_id, r.owner, c.repo_name, c.ref, c.path, c.start_line, c.end_line, c.text
             FROM chunks c
+            JOIN repos r ON c.repo_id = r.id
             WHERE c.chunk_id = %s
             """,
             (chunk_id,),

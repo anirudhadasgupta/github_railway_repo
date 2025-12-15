@@ -32,6 +32,7 @@ class GitHubClient:
         attempt = 0
         while True:
             resp = self._client.request(method, url, **kwargs)
+            # Retry on server errors
             if resp.status_code in {500, 502, 503, 504}:
                 attempt += 1
                 if attempt > 5:
@@ -40,8 +41,16 @@ class GitHubClient:
                 jitter = random.uniform(0.5, 1.5)
                 time.sleep(min(2**attempt * jitter, 10))
                 continue
+            # Handle rate limiting - sleep and retry
             if resp.status_code in {403, 429}:
-                self._handle_rate_limit(resp)
+                remaining = resp.headers.get("X-RateLimit-Remaining")
+                if remaining == "0":
+                    self._handle_rate_limit(resp)
+                    attempt += 1
+                    if attempt > 3:
+                        resp.raise_for_status()
+                        return resp
+                    continue  # Retry after sleeping
             return resp
 
     def _get(self, url: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -89,3 +98,38 @@ class GitHubClient:
 
     def compare(self, owner: str, repo: str, base: str, head: str) -> Dict[str, Any]:
         return self._get(f"/repos/{owner}/{repo}/compare/{base}...{head}")
+
+    def search_code(
+        self,
+        query: str,
+        owner: Optional[str] = None,
+        repo: Optional[str] = None,
+        per_page: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        Search code using GitHub Code Search API.
+
+        Args:
+            query: Search query (supports GitHub qualifiers like path:, language:, extension:)
+            owner: Optional owner to scope search (adds user: qualifier)
+            repo: Optional repo to scope search (adds repo: qualifier)
+            per_page: Results per page (max 100)
+
+        Returns:
+            GitHub search response with items array
+        """
+        # Build query with optional scoping
+        q_parts = [query]
+        if repo and owner:
+            q_parts.append(f"repo:{owner}/{repo}")
+        elif owner:
+            q_parts.append(f"user:{owner}")
+
+        full_query = " ".join(q_parts)
+
+        params = {
+            "q": full_query,
+            "per_page": min(per_page, 100),
+        }
+
+        return self._get("/search/code", params=params)
