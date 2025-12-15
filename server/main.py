@@ -107,14 +107,14 @@ def build_server() -> FastMCP:
 
     # Tool annotations for OpenAI compatibility
     # readOnlyHint: indicates tools don't modify state
-    tool_opts = {"annotations": {"readOnlyHint": True}}
+    tool_opts = {"annotations": {"readOnlyHint": True, "safe": True}}
 
     # Search tool annotations per OpenAI specifications
     # openWorldHint: indicates the tool searches external/dynamic data
-    search_tool_opts = {"annotations": {"readOnlyHint": True, "openWorldHint": True}}
+    search_tool_opts = {"annotations": {"readOnlyHint": True, "openWorldHint": True, "safe": True}}
 
     # Fetch tool annotations - retrieves specific content by ID
-    fetch_tool_opts = {"annotations": {"readOnlyHint": True}}
+    fetch_tool_opts = {"annotations": {"readOnlyHint": True, "safe": True}}
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health_check(request):
@@ -125,37 +125,45 @@ def build_server() -> FastMCP:
             "active_sessions": len(_session_cache),
         })
 
+    help_payload = {
+        "title": "Error recovery playbook",
+        "rules": [
+            {
+                "when": "error == 'Resource not found'",
+                "do": [
+                    "list_resources(refetch_tools=true)",
+                    "grab refreshed /ghtool/link_… paths",
+                    "retry the same operation once",
+                ],
+            },
+            {
+                "when": "error in {502, gateway-ish, 424 wrapper}",
+                "do": [
+                    "heartbeat(session_token) or get_session if missing",
+                    "retry once (optional tiny backoff)",
+                ],
+            },
+            {
+                "when": "heartbeat returns session_valid=false",
+                "do": [
+                    "get_session() to refresh session",
+                    "retry prior operation",
+                ],
+            },
+        ],
+    }
+
+    help_tool_opts = {"annotations": {"readOnlyHint": True, "safe": True}}
+
     @mcp.custom_route("/help", methods=["GET"])
     async def help_route(request):
         """Lightweight troubleshooting guide for tool retries."""
-        help_payload = {
-            "title": "Error recovery playbook",
-            "rules": [
-                {
-                    "when": "error == 'Resource not found'",
-                    "do": [
-                        "list_resources(refetch_tools=true)",
-                        "grab refreshed /ghtool/link_… paths",
-                        "retry the same operation once",
-                    ],
-                },
-                {
-                    "when": "error in {502, gateway-ish, 424 wrapper}",
-                    "do": [
-                        "heartbeat(session_token) or get_session if missing",
-                        "retry once (optional tiny backoff)",
-                    ],
-                },
-                {
-                    "when": "heartbeat returns session_valid=false",
-                    "do": [
-                        "get_session() to refresh session",
-                        "retry prior operation",
-                    ],
-                },
-            ],
-        }
         return JSONResponse(help_payload)
+
+    @mcp.tool(**help_tool_opts)
+    def help() -> dict:
+        """Return the error recovery playbook for retrying MCP tool calls."""
+        return mcp_json(help_payload)
 
     # ---- MCP Resources ----
     # Resources provide discoverable data sources that clients can browse
