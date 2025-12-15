@@ -199,6 +199,29 @@ def build_server() -> FastMCP:
             "active_sessions": len(_session_cache),
         })
 
+    @mcp.custom_route("/", methods=["GET"])
+    async def root_route(request):
+        """Lightweight landing route with discovery pointers."""
+        discovery = _build_discovery(
+            base_url=str(request.base_url), root_path=request.scope.get("root_path", "")
+        )
+        caps = _base_capabilities(discovery)
+        base = str(request.base_url).rstrip("/")
+        root_path = request.scope.get("root_path", "").rstrip("/")
+
+        def link(path: str) -> str:
+            return f"{base}{root_path}{path}" if root_path else f"{base}{path}"
+
+        return JSONResponse({
+            "status": "ok",
+            "message": "GitHub MCP server is ready.",
+            "links": {
+                "health": link("/health"),
+                "help": link("/.well-known/mcp/help"),
+            },
+            "capabilities": caps,
+        })
+
     help_payload = {
         "title": "Error recovery playbook",
         "rules": [
