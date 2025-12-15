@@ -143,6 +143,16 @@ def build_server() -> FastMCP:
     a session_token. Store and reuse this token across reconnections to maintain
     context for up to 1 hour.
 
+    WRAPPER DISCOVERY (MCP metadata for ghtool/* calls):
+    - Before calling any ghtool/* function, call api_tool.list_resources with
+      refetch_tools=true to discover the current wrapper path; do not reuse or
+      copy /link_* paths from prior turns.
+    - If a ghtool call returns "Resource not found", immediately rerun
+      list_resources(refetch_tools=true) and retry once with the newly discovered
+      path.
+    - If a ghtool call fails with 502 or 424, call heartbeat (or get_session if
+      missing) and retry once.
+
     Prefer semantic_search + gh_get_file_content for answering questions.
     Use keyword_search for exact string matches.
     Use file_history and gh_file_diff when reasoning about changes.
@@ -192,6 +202,13 @@ def build_server() -> FastMCP:
     help_payload = {
         "title": "Error recovery playbook",
         "rules": [
+            {
+                "when": "before calling any ghtool/* tool",
+                "do": [
+                    "list_resources(refetch_tools=true) via api_tool before choosing the wrapper path",
+                    "do not reuse cached /link_* wrapper paths from prior turns",
+                ],
+            },
             {
                 "when": "error == 'Resource not found'",
                 "do": [
