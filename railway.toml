@@ -10,12 +10,16 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-# MCP server (FastMCP SSE) entrypoint
+# MCP server (FastMCP SSE) entrypoint - Long-running Docker process
+# NOT serverless: serverless functions kill streams after ~60s
 startCommand = "python -m server.main"
 healthcheckPath = "/health"
+healthcheckTimeout = 30
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
 numReplicas = 1
+# Ensure long-running process mode (not serverless)
+sleepApplication = false
 
 [deploy.env]
 PORT = "8000"
@@ -24,6 +28,8 @@ EMBEDDING_MODEL = "text-embedding-3-large"
 EMBEDDING_DIMS = "1024"
 MAX_FILE_BYTES = "250000"
 EXCLUDE_GLOBS = "node_modules/**,dist/**,build/**,.git/**,vendor/**,**/*.min.js,**/*.lock"
+# Heartbeat interval in seconds (keep connections alive)
+HEARTBEAT_INTERVAL_SECONDS = "30"
 
 [services.worker]
 # Background indexer worker shares the same image

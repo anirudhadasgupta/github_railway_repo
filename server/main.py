@@ -17,7 +17,9 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from .config import require_core_secrets, settings
 from .db import Database
@@ -37,6 +39,29 @@ logger = logging.getLogger("mcp.server")
 # Instance diagnostics
 INSTANCE_ID = str(uuid.uuid4())
 INSTANCE_START_TIME = time.time()
+
+# Heartbeat configuration for Railway load balancer (configurable via env)
+HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "30"))
+
+
+class ConnectionKeepAliveMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware to add headers that prevent Railway/load balancers from closing connections.
+
+    - Connection: keep-alive - Tells Railway not to close the socket
+    - X-Accel-Buffering: no - Disables nginx buffering for instant data transmission
+    - Cache-Control: no-cache, no-transform - Prevents caching and compression
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+
+        # Add keep-alive headers to all responses
+        response.headers["Connection"] = "keep-alive"
+        response.headers["X-Accel-Buffering"] = "no"
+        response.headers["Cache-Control"] = "no-cache, no-transform"
+
+        return response
 
 
 def _default_ref(gh: GitHubClient, owner: str, repo: str, ref: str) -> str:
@@ -281,6 +306,45 @@ def build_server() -> FastMCP:
             "uptime_seconds": round(time.time() - INSTANCE_START_TIME, 2),
         })
 
+    @mcp.custom_route("/heartbeat", methods=["GET"])
+    async def heartbeat_stream(request):
+        """
+        SSE heartbeat endpoint that sends pings every 30s.
+
+        Prevents Railway/load balancer idle timeout by keeping the connection active.
+        Clients can connect to this endpoint to maintain a persistent connection.
+
+        Response format: Server-Sent Events (SSE)
+        - event: ping
+        - data: {"time": <unix_timestamp>, "instance_id": "<id>"}
+        """
+
+        async def generate_heartbeat():
+            """Generate SSE heartbeat events every HEARTBEAT_INTERVAL_SECONDS."""
+            try:
+                while True:
+                    data = {
+                        "time": int(time.time()),
+                        "instance_id": INSTANCE_ID,
+                        "uptime_seconds": round(time.time() - INSTANCE_START_TIME, 2),
+                    }
+                    # SSE format: event line, data line, blank line
+                    yield f"event: ping\ndata: {data}\n\n"
+                    await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                logger.info("heartbeat_stream_closed instance_id=%s", INSTANCE_ID)
+                raise
+
+        return StreamingResponse(
+            generate_heartbeat(),
+            media_type="text/event-stream",
+            headers={
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+                "Cache-Control": "no-cache, no-transform",
+            },
+        )
+
     @mcp.custom_route("/", methods=["GET"])
     async def root_route(request):
         """Landing page with discovery info."""
@@ -440,6 +504,12 @@ def build_server() -> FastMCP:
         return JSONResponse({
             "indexed_repos": [{"owner": r["owner"], "name": r["name"]} for r in rows]
         })
+
+    # Register middleware for keep-alive headers and buffering control
+    # This ensures all responses include headers that prevent Railway/load balancers
+    # from closing connections prematurely
+    mcp._app.add_middleware(ConnectionKeepAliveMiddleware)
+    logger.info("middleware_registered type=ConnectionKeepAliveMiddleware")
 
     return mcp
 
